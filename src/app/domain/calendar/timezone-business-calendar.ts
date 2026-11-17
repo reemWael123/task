@@ -3,6 +3,8 @@ import { BusinessCalendar, CalendarConfig } from '../models/calendar.model';
 interface ParsedShift {
   readonly startMinutes: number;
   readonly endMinutes: number;
+  readonly startStr: string;
+  readonly endStr: string;
 }
 
 interface LocalTimeComponents {
@@ -17,6 +19,53 @@ interface LocalTimeComponents {
   readonly minuteOfDay: number;
 }
 
+function parseAndValidateShiftTime(
+  timeStr: string,
+  fieldName: string,
+  isEnd = false
+): number {
+  if (typeof timeStr !== 'string' || !/^\d{2}:\d{2}$/.test(timeStr)) {
+    throw new Error(
+      `Invalid ${fieldName} format: '${timeStr}'. Expected strict 'HH:mm' format.`
+    );
+  }
+  const [hStr, mStr] = timeStr.split(':');
+  const hours = parseInt(hStr, 10);
+  const minutes = parseInt(mStr, 10);
+
+  // 24:00 is allowed strictly as an end-only boundary
+  if (isEnd && hours === 24) {
+    if (minutes !== 0) {
+      throw new Error(
+        `Invalid ${fieldName} minute: '${minutes}' in '${timeStr}'. If hour is 24, minutes must be 00.`
+      );
+    }
+    return 24 * 60; // 1440
+  }
+
+  if (hours < 0 || hours > 23) {
+    throw new Error(
+      `Invalid ${fieldName} hour: '${hours}' in '${timeStr}'. Hours must be between 00 and 23${isEnd ? ' (or 24:00 for end time)' : ''}.`
+    );
+  }
+  if (minutes < 0 || minutes > 59) {
+    throw new Error(
+      `Invalid ${fieldName} minute: '${minutes}' in '${timeStr}'. Minutes must be between 00 and 59.`
+    );
+  }
+
+  return hours * 60 + minutes;
+}
+
+/**
+ * Calendar implementation supporting arbitrary regional timezones, configurable shifts,
+ * and working days.
+ *
+ * Overnight shifts:
+ * To represent an overnight shift spanning across midnight without losing any minutes,
+ * use '24:00' as the end boundary of the evening shift (e.g. '22:00' to '24:00')
+ * and '00:00' as the start of the morning shift (e.g. '00:00' to '06:00').
+ */
 export class TimezoneBusinessCalendar implements BusinessCalendar {
   public readonly timezone: string;
   private readonly workingDaysSet: Set<number>;
@@ -26,22 +75,61 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
 
   constructor(public readonly config: CalendarConfig) {
     this.timezone = config.timezone;
+
+    if (!Array.isArray(config.workingDays)) {
+      throw new Error('Invalid calendar configuration: workingDays must be an array.');
+    }
+    for (const day of config.workingDays) {
+      if (!Number.isInteger(day) || day < 0 || day > 6) {
+        throw new Error(
+          `Invalid working day index: ${day}. Working day indices must be integers between 0 (Sunday) and 6 (Saturday).`
+        );
+      }
+    }
     this.workingDaysSet = new Set(config.workingDays);
     this.holidaysSet = new Set(config.holidays ?? []);
 
-    this.parsedShifts = config.shifts.map(shift => {
-      const [sh, sm] = shift.start.split(':').map(val => parseInt(val, 10));
-      const [eh, em] = shift.end.split(':').map(val => parseInt(val, 10));
-      const startMinutes = (sh ?? 0) * 60 + (sm ?? 0);
-      const endMinutes = (eh ?? 0) * 60 + (em ?? 0);
+    if (!Array.isArray(config.shifts)) {
+      throw new Error('Invalid calendar configuration: shifts must be an array.');
+    }
+
+    const rawParsedShifts: ParsedShift[] = config.shifts.map(shift => {
+      const startMinutes = parseAndValidateShiftTime(shift.start, 'shift start', false);
+      const endMinutes = parseAndValidateShiftTime(shift.end, 'shift end', true);
 
       if (startMinutes >= endMinutes) {
         throw new Error(
           `Invalid shift window: start '${shift.start}' must be strictly before end '${shift.end}'`
         );
       }
-      return { startMinutes, endMinutes };
+      return {
+        startMinutes,
+        endMinutes,
+        startStr: shift.start,
+        endStr: shift.end
+      };
     });
+
+    // Sort shifts chronologically by startMinutes (and endMinutes for tie-break)
+    const sortedShifts = [...rawParsedShifts].sort((a, b) => {
+      if (a.startMinutes !== b.startMinutes) {
+        return a.startMinutes - b.startMinutes;
+      }
+      return a.endMinutes - b.endMinutes;
+    });
+
+    // Reject overlapping shifts
+    for (let i = 0; i < sortedShifts.length - 1; i++) {
+      const current = sortedShifts[i];
+      const next = sortedShifts[i + 1];
+      if (current.endMinutes > next.startMinutes) {
+        throw new Error(
+          `Overlapping shifts detected: '${current.startStr}-${current.endStr}' and '${next.startStr}-${next.endStr}'`
+        );
+      }
+    }
+
+    this.parsedShifts = sortedShifts;
 
     this.dateTimeFormatter = new Intl.DateTimeFormat('en-US', {
       timeZone: this.timezone,
@@ -51,7 +139,7 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      hour12: false,
+      hourCycle: 'h23',
       weekday: 'short'
     });
   }
@@ -75,7 +163,9 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
     }
 
     if (this.workingDaysSet.size === 0 || this.parsedShifts.length === 0) {
-      return new Date(start.getTime());
+      throw new Error(
+        'Cannot add business minutes: calendar has no working days or shifts configured'
+      );
     }
 
     let remainingMs = Math.round(minutes * 60000);
@@ -152,6 +242,12 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
       }
     }
 
+    if (remainingMs > 0) {
+      throw new Error(
+        `MAX_DAYS_ITERATIONS (${MAX_DAYS_ITERATIONS}) reached: unable to add business minutes within maximum search window`
+      );
+    }
+
     return current;
   }
 
@@ -168,6 +264,7 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
     const endLocal = this.getLocalComponents(end);
 
     let totalWorkingMs = 0;
+    let lastCountedEndMs = -Infinity;
     let cursorUtc = Date.UTC(startLocal.year, startLocal.month - 1, startLocal.day);
     const endCursorUtc = Date.UTC(endLocal.year, endLocal.month - 1, endLocal.day);
 
@@ -194,8 +291,11 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
           const overlapStart = Math.max(start.getTime(), shiftStartUtc.getTime());
           const overlapEnd = Math.min(end.getTime(), shiftEndUtc.getTime());
 
-          if (overlapEnd > overlapStart) {
-            totalWorkingMs += overlapEnd - overlapStart;
+          const effectiveStart = Math.max(overlapStart, lastCountedEndMs);
+
+          if (overlapEnd > effectiveStart) {
+            totalWorkingMs += overlapEnd - effectiveStart;
+            lastCountedEndMs = overlapEnd;
           }
         }
       }
@@ -228,7 +328,7 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
           day = parseInt(p.value, 10);
           break;
         case 'hour':
-          hour = parseInt(p.value, 10) % 24;
+          hour = parseInt(p.value, 10);
           break;
         case 'minute':
           minute = parseInt(p.value, 10);
@@ -286,7 +386,7 @@ export class TimezoneBusinessCalendar implements BusinessCalendar {
           case 'year': y = parseInt(p.value, 10); break;
           case 'month': m = parseInt(p.value, 10); break;
           case 'day': dt = parseInt(p.value, 10); break;
-          case 'hour': h = parseInt(p.value, 10) % 24; break;
+          case 'hour': h = parseInt(p.value, 10); break;
           case 'minute': min = parseInt(p.value, 10); break;
           case 'second': s = parseInt(p.value, 10); break;
         }
