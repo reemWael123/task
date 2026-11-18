@@ -2,6 +2,7 @@ import { Inject, Injectable, InjectionToken, OnDestroy, Optional } from '@angula
 import {
   BehaviorSubject,
   combineLatest,
+  defer,
   forkJoin,
   Observable,
   of,
@@ -13,6 +14,7 @@ import {
   catchError,
   distinctUntilChanged,
   map,
+  retry,
   switchMap,
   takeUntil
 } from 'rxjs/operators';
@@ -518,7 +520,9 @@ export class DeskFacade implements OnDestroy {
       resetSeq ?? this.pipeline.pendingResetSeq ?? this.pipeline.state.lastSeq;
 
     return forkJoin({
-      agents: this.gateway.getAgents(),
+      agents: defer(() => this.gateway!.getAgents()).pipe(
+        retry({ count: 2, resetOnSuccess: true })
+      ),
       allTickets: this.fetchAllTicketPages()
     }).pipe(
       map(({ agents, allTickets }) => {
@@ -817,7 +821,39 @@ export class DeskFacade implements OnDestroy {
   }
 
   /**
-   * Fetches all pages of tickets from TicketGateway.
+   * Fetches a single page of tickets with a bounded retry policy (max 2 retries).
+   * Identifies the failed page in the error if all retries are exhausted.
+   */
+  private fetchTicketPageWithRetry(
+    page: number,
+    pageSize: number,
+    maxRetries = 2
+  ): Observable<PaginatedTickets> {
+    if (!this.gateway) {
+      return of({
+        tickets: [],
+        total: 0,
+        page,
+        pageSize,
+        totalPages: 0
+      });
+    }
+
+    return defer(() => this.gateway!.getTickets(page, pageSize)).pipe(
+      retry({ count: maxRetries, resetOnSuccess: true }),
+      catchError(err => {
+        const rawMessage = err instanceof Error ? err.message : String(err);
+        const pageToken = `page ${page}`;
+        const formattedMessage = rawMessage.toLowerCase().includes(pageToken)
+          ? rawMessage
+          : `Failed to fetch tickets page ${page}: ${rawMessage}`;
+        return throwError(() => new Error(formattedMessage));
+      })
+    );
+  }
+
+  /**
+   * Fetches all pages of tickets from TicketGateway with bounded retries and deduplication.
    */
   private fetchAllTicketPages(): Observable<readonly Ticket[]> {
     if (!this.gateway) {
@@ -826,28 +862,34 @@ export class DeskFacade implements OnDestroy {
 
     const pageSize = 200;
 
-    return this.gateway.getTickets(1, pageSize).pipe(
+    return this.fetchTicketPageWithRetry(1, pageSize).pipe(
       switchMap(firstPage => {
         const total = firstPage.total;
-        const collectedTickets = [...firstPage.tickets];
+        const ticketMap = new Map<string, Ticket>();
+
+        for (const t of firstPage.tickets) {
+          ticketMap.set(t.id, t);
+        }
 
         if (total <= pageSize) {
-          return of(collectedTickets);
+          return of(Array.from(ticketMap.values()));
         }
 
         const totalPages = Math.ceil(total / pageSize);
         const remainingPageObservables: Observable<PaginatedTickets>[] = [];
 
         for (let page = 2; page <= totalPages; page++) {
-          remainingPageObservables.push(this.gateway!.getTickets(page, pageSize));
+          remainingPageObservables.push(this.fetchTicketPageWithRetry(page, pageSize));
         }
 
         return forkJoin(remainingPageObservables).pipe(
           map(pages => {
             for (const p of pages) {
-              collectedTickets.push(...p.tickets);
+              for (const t of p.tickets) {
+                ticketMap.set(t.id, t);
+              }
             }
-            return collectedTickets;
+            return Array.from(ticketMap.values());
           })
         );
       })

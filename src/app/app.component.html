@@ -2,6 +2,30 @@
   <!-- Top Navigation Header -->
   <app-header (toggleSimulator)="onToggleSimulator()"></app-header>
 
+  <!-- Global Error Notification Banner with Retry -->
+  <div class="error-banner" *ngIf="facade.error as errorMsg" role="alert">
+    <div class="error-banner-content">
+      <span class="error-icon">⚠️</span>
+      <span class="error-text">{{ errorMsg }}</span>
+    </div>
+    <div class="error-banner-actions">
+      <button
+        type="button"
+        class="btn-retry"
+        (click)="facade.resynchronize().subscribe()"
+        [disabled]="facade.isLoading"
+      >
+        {{ facade.isLoading ? '⏳ Retrying...' : '🔄 Retry' }}
+      </button>
+      <button
+        type="button"
+        class="btn-dismiss"
+        (click)="facade.clearError()"
+        title="Dismiss error"
+      >✕</button>
+    </div>
+  </div>
+
   <!-- SLA Policy Simulator Drawer / Panel -->
   <app-sla-simulator
     *ngIf="showSimulator"

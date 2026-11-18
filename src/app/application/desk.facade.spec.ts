@@ -82,6 +82,8 @@ describe('DeskFacade', () => {
     public shouldFailTickets = false;
     public shouldFailAgents = false;
     public failPage?: number;
+    public pageCallCounts: Record<number, number> = {};
+    public transientFailPage?: { page: number; failTimes: number };
     public assignTicketResponse?: (
       ticketId: string,
       agentId: string,
@@ -89,8 +91,15 @@ describe('DeskFacade', () => {
     ) => Observable<Ticket>;
 
     getTickets(page = 1, pageSize = 200) {
+      this.pageCallCounts[page] = (this.pageCallCounts[page] ?? 0) + 1;
+
       if (this.shouldFailTickets) {
         return throwError(() => new Error('HTTP 500: Tickets endpoint failed'));
+      }
+      if (this.transientFailPage && this.transientFailPage.page === page) {
+        if (this.pageCallCounts[page] <= this.transientFailPage.failTimes) {
+          return throwError(() => new Error(`HTTP 500: Tickets page ${page} failed`));
+        }
       }
       if (this.failPage !== undefined && this.failPage === page) {
         return throwError(() => new Error(`HTTP 500: Tickets page ${page} failed`));
@@ -456,6 +465,199 @@ describe('DeskFacade', () => {
       expect(facade.error).toContain('HTTP 500: Tickets page 2 failed');
       expect(facade.syncStatus).toBe('error');
       expect(caughtError).toBeDefined();
+    });
+
+    it('should successfully recover when random page failure is followed by successful retry', () => {
+      // 3 pages: 600 total tickets
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('t1-1'), createTicket('t1-2')],
+        total: 600,
+        page: 1,
+        pageSize: 200
+      };
+      gateway.ticketsPages[2] = {
+        tickets: [createTicket('t2-1'), createTicket('t2-2')],
+        total: 600,
+        page: 2,
+        pageSize: 200
+      };
+      gateway.ticketsPages[3] = {
+        tickets: [createTicket('t3-1'), createTicket('t3-2')],
+        total: 600,
+        page: 3,
+        pageSize: 200
+      };
+
+      // Page 2 fails once, then succeeds on retry
+      gateway.transientFailPage = { page: 2, failTimes: 1 };
+
+      let completed = false;
+      facade.resynchronize(20).subscribe(() => (completed = true));
+
+      expect(completed).toBe(true);
+      expect(gateway.pageCallCounts[2]).toBe(2); // Attempt 1 failed, Attempt 2 succeeded
+      expect(facade.tickets.length).toBe(6);
+      expect(facade.isLoading).toBe(false);
+      expect(facade.error).toBeNull();
+      expect(facade.syncStatus).toBe('synced');
+    });
+
+    it('should enforce bounded retry policy (max 2 retries) and fail with descriptive page error when failure persists', () => {
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('t1-1')],
+        total: 400,
+        page: 1,
+        pageSize: 200
+      };
+      // Page 2 fails persistently (fail 5 times, but policy max 2 retries = 3 attempts total)
+      gateway.transientFailPage = { page: 2, failTimes: 5 };
+
+      let caughtError: any = null;
+      facade.resynchronize(15).subscribe({
+        error: err => (caughtError = err)
+      });
+
+      // 1 initial attempt + 2 retries = 3 calls total
+      expect(gateway.pageCallCounts[2]).toBe(3);
+      expect(caughtError).toBeDefined();
+      expect(facade.error).toContain('page 2');
+      expect(facade.syncStatus).toBe('error');
+      expect(facade.isLoading).toBe(false);
+    });
+
+    it('should preserve previously loaded tickets on the visible board after a failed refresh', () => {
+      // 1. Initial successful synchronization with 2 tickets
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('initial-1'), createTicket('initial-2')],
+        total: 2,
+        page: 1,
+        pageSize: 200
+      };
+
+      facade.resynchronize(10).subscribe();
+      expect(facade.tickets.length).toBe(2);
+      expect(facade.syncStatus).toBe('synced');
+
+      // 2. Trigger second resynchronization, but page 2 fails persistently
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('new-1')],
+        total: 400,
+        page: 1,
+        pageSize: 200
+      };
+      gateway.failPage = 2;
+
+      let caughtError: any = null;
+      facade.resynchronize(20).subscribe({
+        error: err => (caughtError = err)
+      });
+
+      expect(caughtError).toBeDefined();
+      expect(facade.syncStatus).toBe('error');
+      expect(facade.error).toContain('page 2');
+      // Visible board MUST preserve the initial 2 tickets, not be cleared or empty
+      expect(facade.tickets.length).toBe(2);
+      expect(facade.tickets.map(t => t.id)).toEqual(['initial-1', 'initial-2']);
+    });
+
+    it('should successfully load all 25 pages (5000 tickets) without errors', () => {
+      const TOTAL_PAGES = 25;
+      const PAGE_SIZE = 200;
+      const TOTAL_TICKETS = TOTAL_PAGES * PAGE_SIZE;
+
+      for (let p = 1; p <= TOTAL_PAGES; p++) {
+        const pageTickets: Ticket[] = [];
+        for (let i = 0; i < PAGE_SIZE; i++) {
+          const num = (p - 1) * PAGE_SIZE + i + 1;
+          pageTickets.push(createTicket(`ticket-${num}`));
+        }
+        gateway.ticketsPages[p] = {
+          tickets: pageTickets,
+          total: TOTAL_TICKETS,
+          page: p,
+          pageSize: PAGE_SIZE,
+          totalPages: TOTAL_PAGES
+        };
+      }
+
+      let completed = false;
+      facade.resynchronize(100).subscribe(() => (completed = true));
+
+      expect(completed).toBe(true);
+      expect(facade.tickets.length).toBe(5000);
+      expect(facade.isLoading).toBe(false);
+      expect(facade.error).toBeNull();
+      expect(facade.syncStatus).toBe('synced');
+    });
+
+    it('should prevent duplicate tickets when pages overlap or after retry', () => {
+      // Page 1 contains ticket-dup-1 and ticket-dup-2
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('ticket-dup-1'), createTicket('ticket-dup-2')],
+        total: 400,
+        page: 1,
+        pageSize: 200
+      };
+      // Page 2 contains overlapping ticket-dup-2 and unique ticket-dup-3
+      gateway.ticketsPages[2] = {
+        tickets: [createTicket('ticket-dup-2'), createTicket('ticket-dup-3')],
+        total: 400,
+        page: 2,
+        pageSize: 200
+      };
+
+      facade.resynchronize(10).subscribe();
+
+      // Deduplication: ticket-dup-2 appears only once
+      expect(facade.tickets.length).toBe(3);
+      const uniqueIds = new Set(facade.tickets.map(t => t.id));
+      expect(uniqueIds.size).toBe(3);
+    });
+
+    it('should behave as expected when forced HTTP 500 is enabled on MockGateway', () => {
+      gateway.shouldFailTickets = true;
+
+      let caughtError: any = null;
+      facade.resynchronize(10).subscribe({
+        error: err => (caughtError = err)
+      });
+
+      expect(caughtError).toBeDefined();
+      expect(gateway.pageCallCounts[1]).toBe(3); // 1 initial + 2 retries
+      expect(facade.error).toContain('HTTP 500: Tickets endpoint failed');
+      expect(facade.syncStatus).toBe('error');
+      expect(facade.isLoading).toBe(false);
+    });
+
+    it('should allow user to retry resync after failure and recover state', () => {
+      // 1. First call fails because page 1 is failing
+      gateway.failPage = 1;
+      let error1: any = null;
+      facade.resynchronize(10).subscribe({
+        error: err => (error1 = err)
+      });
+      expect(error1).toBeDefined();
+      expect(facade.syncStatus).toBe('error');
+      expect(facade.error).toContain('page 1');
+
+      // 2. Gateway recovers
+      delete gateway.failPage;
+      gateway.ticketsPages[1] = {
+        tickets: [createTicket('recovered-ticket')],
+        total: 1,
+        page: 1,
+        pageSize: 200
+      };
+
+      // 3. User retries resynchronize
+      let completed = false;
+      facade.resynchronize(10).subscribe(() => (completed = true));
+
+      expect(completed).toBe(true);
+      expect(facade.syncStatus).toBe('synced');
+      expect(facade.error).toBeNull();
+      expect(facade.tickets.length).toBe(1);
+      expect(facade.tickets[0].id).toBe('recovered-ticket');
     });
   });
 
