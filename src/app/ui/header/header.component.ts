@@ -46,7 +46,7 @@ import { TICKET_GATEWAY } from '../../application/ticket-gateway.interface';
           🔄 Resync Stream
         </button>
 
-        <button
+        <!-- <button
           type="button"
           class="btn-control"
           [class.active]="isHttp500Forced"
@@ -64,7 +64,7 @@ import { TICKET_GATEWAY } from '../../application/ticket-gateway.interface';
           title="Simulate HTTP 409 Conflict on gateway"
         >
           ⚡ Force 409
-        </button>
+        </button> -->
 
         <button
           type="button"
