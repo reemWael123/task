@@ -1,5 +1,5 @@
-import { Component, inject, OnInit } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { Component, inject, OnInit, PLATFORM_ID } from '@angular/core';
+import { CommonModule, isPlatformBrowser } from '@angular/common';
 import { DeskFacade } from './application/desk.facade';
 import { Ticket } from './domain/models';
 import {
@@ -27,14 +27,17 @@ import {
   styleUrl: './app.component.css'
 })
 export class AppComponent implements OnInit {
+  private readonly platformId = inject(PLATFORM_ID);
   public readonly facade = inject(DeskFacade);
 
   public selectedTicket: Ticket | null = null;
   public showSimulator = false;
 
   public ngOnInit(): void {
-    // Initial data hydration: fetch tickets and agents via paginated resynchronize
-    this.facade.resynchronize().subscribe();
+    if (isPlatformBrowser(this.platformId)) {
+      // Initial data hydration: fetch tickets and agents via paginated resynchronize
+      this.facade.resynchronize().subscribe();
+    }
   }
 
   public onSelectTicket(ticket: Ticket): void {

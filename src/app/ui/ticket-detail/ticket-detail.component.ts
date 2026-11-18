@@ -1,7 +1,7 @@
 import { Component, EventEmitter, inject, Input, Output } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { DeskFacade } from '../../application/desk.facade';
-import { Ticket, TicketStatus } from '../../domain/models';
+import { Agent, Ticket, TicketStatus } from '../../domain/models';
 import { TICKET_GATEWAY, TicketGateway } from '../../application/ticket-gateway.interface';
 import { MockGateway } from '../../data/mock-gateway.service';
 
@@ -49,9 +49,9 @@ import { MockGateway } from '../../data/mock-gateway.service';
             <div class="assignee-info" *ngIf="currentTicket.assigneeId; else unassignedState">
               <div class="agent-avatar">👤</div>
               <div class="agent-details">
-                <h4>{{ facade.state.agents[currentTicket.assigneeId]?.name || currentTicket.assigneeId }}</h4>
-                <p>Status: <strong>{{ facade.state.agents[currentTicket.assigneeId]?.status || 'unknown' }}</strong> | Current Load: {{ facade.agentLoad[currentTicket.assigneeId] || 0 }}</p>
-                <p class="shift-info" *ngIf="facade.state.agents[currentTicket.assigneeId]?.shift as shift">
+                <h4>{{ assignedAgent?.name || currentTicket.assigneeId }}</h4>
+                <p>Status: <strong>{{ assignedAgent?.status || 'unknown' }}</strong> | Current Load: {{ facade.agentLoad[currentTicket.assigneeId] || 0 }}</p>
+                <p class="shift-info" *ngIf="assignedAgent?.shift as shift">
                   Shift: {{ shift.start }} - {{ shift.end }} ({{ shift.tz }})
                 </p>
               </div>
@@ -467,6 +467,11 @@ export class TicketDetailComponent {
 
   @Input({ required: true }) public ticket!: Ticket;
   @Output() public readonly close = new EventEmitter<void>();
+
+  public get assignedAgent(): Agent | undefined {
+    const id = this.currentTicket.assigneeId;
+    return id ? this.facade.state.agents[id] : undefined;
+  }
 
   public get currentTicket(): Ticket {
     // Keep synced with facade state

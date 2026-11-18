@@ -1,4 +1,4 @@
-import { ComponentFixture, TestBed } from '@angular/core';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { TicketDetailComponent } from './ticket-detail.component';
 import { DeskFacade } from '../../application/desk.facade';
 import { TICKET_GATEWAY } from '../../application/ticket-gateway.interface';

@@ -170,7 +170,7 @@ import { Agent, Priority, Region, SlaState, Ticket, TicketStatus } from '../../d
                   <td>
                     <div class="assignee-cell">
                       <span *ngIf="ticket.assigneeId" class="agent-name">
-                        👤 {{ facade.state.agents[ticket.assigneeId]?.name || ticket.assigneeId }}
+                        👤 {{ getAgentName(ticket.assigneeId) }}
                       </span>
                       <span *ngIf="!ticket.assigneeId" class="unassigned-pill">
                         Unassigned
@@ -727,6 +727,11 @@ export class TicketBoardComponent implements OnInit {
 
     this.offsetY = startIndex * this.rowHeight;
     this.visibleTickets = this.filteredTickets.slice(startIndex, endIndex);
+  }
+
+  public getAgentName(agentId?: string): string {
+    if (!agentId) return '';
+    return this.facade.state.agents[agentId]?.name || agentId;
   }
 
   public trackById(_index: number, ticket: Ticket): string {

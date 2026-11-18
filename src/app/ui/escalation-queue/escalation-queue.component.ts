@@ -41,7 +41,7 @@ export interface EscalationItem {
             <span class="priority-chip" [ngClass]="item.ticket.priority">{{ item.ticket.priority }}</span>
             <span class="region-chip">{{ item.ticket.region }}</span>
             <span class="assignee-text">
-              {{ item.ticket.assigneeId ? (facade.state.agents[item.ticket.assigneeId]?.name || item.ticket.assigneeId) : '⚠️ Unassigned' }}
+              {{ item.ticket.assigneeId ? getAgentName(item.ticket.assigneeId) : '⚠️ Unassigned' }}
             </span>
           </div>
 
@@ -250,6 +250,11 @@ export class EscalationQueueComponent {
   public readonly facade = inject(DeskFacade);
 
   @Output() public readonly selectTicket = new EventEmitter<Ticket>();
+
+  public getAgentName(agentId?: string): string {
+    if (!agentId) return '';
+    return this.facade.state.agents[agentId]?.name || agentId;
+  }
 
   public get escalations(): EscalationItem[] {
     const list: EscalationItem[] = [];
