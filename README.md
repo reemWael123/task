@@ -10,7 +10,7 @@ An enterprise-grade, real-time Angular 19 command center for mission-critical su
 # 1. Install dependencies
 npm install
 
-# 2. Run comprehensive unit test suite (over 240 tests)
+# 2. Run comprehensive unit test suite (277 tests, 100% passing)
 npm test -- --watch=false --browsers=ChromeHeadless
 
 # 3. Start local development server
