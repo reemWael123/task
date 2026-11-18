@@ -152,7 +152,7 @@ Shifts are defined explicitly as `{ start: '08:00', end: '16:00' }` or `{ start:
 - **P4**: First Response 120m, Resolution 960m, VIP Multiplier 1.0.
 
 ### SLA Rules & State Machine:
-- **States**: `ok` (elapsed < 80%), `at_risk` (elapsed ≥ 80% and < 100%), `breached` (elapsed ≥ 100%), `paused`.
+- **States**: `ok` (elapsed < 70%), `at_risk` (elapsed ≥ 70% and ≤ 100%), `breached` (elapsed > 100%), `paused`.
 - **Paused Intervals**: Non-VIP tickets in `pending_customer` or `on_hold` pause the SLA clock. Paused intervals are summed and deducted from elapsed time, extending `dueAt`.
 - **Day 2 P1 VIP 24/7 Rule (Option 2B)**:
   - Critical VIP tickets (P1 VIP) are emergency 24/7 events.
