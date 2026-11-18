@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnDestroy, Optional } from '@angular/core';
+import { Inject, Injectable, InjectionToken, OnDestroy, Optional } from '@angular/core';
 import {
   BehaviorSubject,
   combineLatest,
@@ -26,7 +26,8 @@ import {
   Region,
   ShiftWindow,
   SlaPolicy,
-  Ticket
+  Ticket,
+  TicketStatus
 } from '../domain/models';
 import {
   DeskSnapshot,
@@ -89,6 +90,8 @@ export interface SlaConfig {
   readonly clock?: () => Date;
 }
 
+export const SLA_CONFIG = new InjectionToken<SlaConfig>('SLA_CONFIG');
+
 /**
  * Mutation lifecycle status.
  * 'pending': In-flight optimistic mutation awaiting API response.
@@ -119,6 +122,7 @@ export interface ReassignmentRecord {
   readonly previousAssignee: string;
   readonly targetAgentId: string;
   readonly assignedVersion: number;
+  readonly assignedStatus: TicketStatus;
   readonly timestamp: number;
 }
 
@@ -164,16 +168,19 @@ export class DeskFacade implements OnDestroy {
   public readonly syncStatus$: Observable<PipelineSyncStatus>;
   public readonly lastSeq$: Observable<number>;
 
+  private readonly pipeline: EventPipeline;
+
   constructor(
-    private readonly pipeline: EventPipeline,
+    @Optional() pipeline?: EventPipeline,
     @Optional() @Inject(TICKET_GATEWAY) private readonly gateway?: TicketGateway,
-    @Optional() config?: SlaConfig
+    @Optional() @Inject(SLA_CONFIG) config?: SlaConfig
   ) {
+    this.pipeline = pipeline ?? new EventPipeline();
     this._clock = config?.clock ?? (() => new Date());
     this._policies = config?.policies ?? DEFAULT_SLA_POLICIES;
     this._calendars = config?.calendars ?? createDefaultCalendars();
 
-    const initialState = createInitialApplicationState(pipeline.state.agents);
+    const initialState = createInitialApplicationState(this.pipeline.state.agents);
     this._state$ = new BehaviorSubject<ApplicationState>(initialState);
     this.state$ = this._state$.asObservable();
 
@@ -356,8 +363,8 @@ export class DeskFacade implements OnDestroy {
       // otherwise use the optimistic ticket overlay.
       if (mutation.status === 'api-confirmed' && mutation.confirmedTicket) {
         tickets[ticketId] = {
-          ...baseTicket,
           ...mutation.confirmedTicket,
+          ...baseTicket,
           assigneeId: mutation.targetAgentId,
           version: mutation.optimisticVersion
         };
@@ -564,7 +571,10 @@ export class DeskFacade implements OnDestroy {
    * Applies optimistic assignment immediately with consistent agent load updates,
    * rolls back on HTTP 409 or 500 failure, and reconciles with authoritative state.
    */
-  public autoAssignTicket(ticketId: string): Observable<AssignmentResult | null> {
+  public autoAssignTicket(
+    ticketId: string,
+    recordUndo = true
+  ): Observable<AssignmentResult | null> {
     const currentTicket = this.state.tickets[ticketId];
     if (!currentTicket) {
       return of(null);
@@ -598,18 +608,19 @@ export class DeskFacade implements OnDestroy {
       status: 'pending'
     });
 
-    if (previousAssignee && previousAssignee !== agentId) {
+    // Immediately apply optimistic state
+    this.recomputeState();
+
+    if (recordUndo && previousAssignee && previousAssignee !== agentId) {
       this._reassignmentHistory.set(ticketId, {
         ticketId,
         previousAssignee,
         targetAgentId: agentId,
         assignedVersion: optimisticVersion,
+        assignedStatus: currentTicket.status,
         timestamp: this._clock().getTime()
       });
     }
-
-    // Immediately apply optimistic state
-    this.recomputeState();
 
     if (this.gateway?.assignTicket) {
       return this.gateway.assignTicket(ticketId, agentId, previousVersion).pipe(
@@ -659,7 +670,11 @@ export class DeskFacade implements OnDestroy {
    * rolls back on HTTP 409 or 500 failure, and reconciles with authoritative state.
    * Handles concurrent mutations safely (older failed requests do not overwrite newer assignments).
    */
-  public assignTicket(ticketId: string, agentId: string): Observable<Ticket | null> {
+  public assignTicket(
+    ticketId: string,
+    agentId: string,
+    recordUndo = true
+  ): Observable<Ticket | null> {
     const currentTicket = this.state.tickets[ticketId];
     if (!currentTicket) {
       return of(null);
@@ -687,18 +702,19 @@ export class DeskFacade implements OnDestroy {
       status: 'pending'
     });
 
-    if (previousAssignee && previousAssignee !== agentId) {
+    // Immediately apply optimistic state
+    this.recomputeState();
+
+    if (recordUndo && previousAssignee && previousAssignee !== agentId) {
       this._reassignmentHistory.set(ticketId, {
         ticketId,
         previousAssignee,
         targetAgentId: agentId,
         assignedVersion: optimisticVersion,
+        assignedStatus: currentTicket.status,
         timestamp: this._clock().getTime()
       });
     }
-
-    // Immediately apply optimistic state
-    this.recomputeState();
 
     if (this.gateway?.assignTicket) {
       return this.gateway.assignTicket(ticketId, agentId, previousVersion).pipe(
@@ -764,7 +780,8 @@ export class DeskFacade implements OnDestroy {
     }
     return (
       currentTicket.version === record.assignedVersion &&
-      currentTicket.assigneeId === record.targetAgentId
+      currentTicket.assigneeId === record.targetAgentId &&
+      currentTicket.status === record.assignedStatus
     );
   }
 
@@ -784,7 +801,7 @@ export class DeskFacade implements OnDestroy {
     }
 
     this._reassignmentHistory.delete(ticketId);
-    return this.assignTicket(ticketId, record.previousAssignee);
+    return this.assignTicket(ticketId, record.previousAssignee, false);
   }
 
   /**

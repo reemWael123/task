@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@angular/core';
+import { Inject, Injectable, InjectionToken, Optional } from '@angular/core';
 import { Observable, Subject, defer, of, throwError, timer } from 'rxjs';
 import { delay, map, switchMap } from 'rxjs/operators';
 
@@ -29,6 +29,8 @@ export interface MockGatewayConfig {
   readonly autoEmitEvents?: boolean; // Auto-generate background stream events
   readonly autoEmitIntervalMs?: number;
 }
+
+export const MOCK_GATEWAY_CONFIG = new InjectionToken<MockGatewayConfig>('MOCK_GATEWAY_CONFIG');
 
 /**
  * Standard list of mock agents across all supported regions and shifts.
@@ -160,7 +162,7 @@ export class MockGateway implements TicketGateway {
   public forceHttp500 = false;
   public forceHttp409 = false;
 
-  constructor(@Optional() config?: MockGatewayConfig) {
+  constructor(@Optional() @Inject(MOCK_GATEWAY_CONFIG) config?: MockGatewayConfig) {
     this._config = {
       totalTickets: config?.totalTickets ?? 5000,
       pageSize: config?.pageSize ?? 200,
